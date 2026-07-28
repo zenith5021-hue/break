@@ -1,26 +1,32 @@
 /**
- * pedal-connector.js
+ * pedal-connector.js (Web Serial / USB 유선 버전)
  *
  * 기존 웹페이지에 <script src="pedal-connector.js"></script> 한 줄만 추가하면
- * 화면 오른쪽 아래에 작은 "마이크로비트 연결" 버튼이 나타납니다.
- * 발판(마이크로비트)을 밟으면 이 페이지에 스페이스바 keydown/keyup 이벤트를
- * 그대로 발생시켜서, 기존에 Space로 반응하던 로직이 그대로 작동합니다.
+ * 화면 오른쪽 아래에 작은 "발페달 연결" 버튼이 나타납니다.
  *
- * 전제: micro:bit MakeCode에서
- *  - Project Settings > No Pairing Required 켜짐
- *  - bluetooth.startUartService() 로 시작
- *  - 핀 눌림/떼짐 시 "PRESS" / "RELEASE" 문자열을 uartWriteString 으로 전송
+ * 마이크로비트를 USB 케이블로 컴퓨터에 연결한 뒤 이 버튼을 누르면,
+ * 발판을 밟을 때(PRESS)/뗄 때(RELEASE) 이 페이지에 스페이스바
+ * keydown/keyup 이벤트를 그대로 발생시켜서, 기존에 Space로 반응하던
+ * 로직이 그대로 작동합니다.
  *
- * 제약: Web Bluetooth는 크롬/엣지 등 크로미움 계열 브라우저에서만 동작하며,
- * HTTPS(GitHub Pages 포함)에서 열어야 합니다. 사파리는 지원하지 않습니다.
+ * 마이크로비트 쪽 코드 (블루투스 불필요, USB 시리얼만 사용):
+ *   input.onPinPressed(TouchPin.P0, function () {
+ *       serial.writeLine("PRESS")
+ *   })
+ *   input.onPinReleased(TouchPin.P0, function () {
+ *       serial.writeLine("RELEASE")
+ *   })
+ *
+ * 제약: Web Serial은 크롬/엣지 등 크로미움 계열 브라우저에서만 동작하며,
+ * HTTPS(GitHub Pages 포함)에서 열어야 합니다. 사파리/파이어폭스는 지원하지 않습니다.
+ * MakeCode 편집기 탭에서 콘솔/WebUSB로 이미 이 마이크로비트에 연결되어 있으면
+ * 포트가 사용 중이라 열리지 않을 수 있으니, 그 탭은 닫아주세요.
  */
 (function(){
-  const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-  const UART_TX_CHAR  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+  const BAUD_RATE = 115200; // micro:bit 기본 시리얼 통신 속도
 
-  // 오른쪽 아래 떠 있는 연결 버튼 생성 (기존 페이지 레이아웃을 건드리지 않음)
   const btn = document.createElement('button');
-  btn.textContent = '🔵 발페달 연결';
+  btn.textContent = '🔌 발페달 연결(USB)';
   Object.assign(btn.style, {
     position: 'fixed', right: '16px', bottom: '16px', zIndex: 999999,
     padding: '10px 14px', borderRadius: '10px', border: '1px solid #3a4f68',
@@ -38,35 +44,55 @@
     document.dispatchEvent(evt);
   }
 
+  async function readLoop(port){
+    const textDecoder = new TextDecoderStream();
+    const readableClosed = port.readable.pipeTo(textDecoder.writable);
+    const reader = textDecoder.readable.getReader();
+    let buffer = '';
+
+    try{
+      while (true){
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        buffer += value;
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) >= 0){
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (line === 'PRESS'){
+            sendSpaceKey('keydown');
+          } else if (line === 'RELEASE'){
+            sendSpaceKey('keyup');
+          }
+        }
+      }
+    }catch(err){
+      console.warn('발페달 읽기 중 오류:', err.message);
+    }finally{
+      reader.releaseLock();
+    }
+  }
+
   async function connect(){
-    if (!navigator.bluetooth){
-      alert('이 브라우저는 Web Bluetooth를 지원하지 않아요. 크롬 또는 엣지로 열어주세요.');
+    if (!('serial' in navigator)){
+      alert('이 브라우저는 Web Serial을 지원하지 않아요. 크롬 또는 엣지로 열어주세요.');
       return;
     }
     try{
       btn.textContent = '연결 중...';
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'BBC micro:bit' }],
-        optionalServices: [UART_SERVICE],
-      });
-      device.addEventListener('gattserverdisconnected', () => {
-        btn.textContent = '🔵 발페달 연결 (끊김, 재연결)';
-      });
+      const port = await navigator.serial.requestPort();
+      await port.open({ baudRate: BAUD_RATE });
 
-      const server = await device.gatt.connect();
-      const service = await server.getPrimaryService(UART_SERVICE);
-      const txChar = await service.getCharacteristic(UART_TX_CHAR);
-      await txChar.startNotifications();
+      btn.textContent = '✅ 발페달 연결됨 (USB)';
+      readLoop(port);
 
-      txChar.addEventListener('characteristicvaluechanged', (event) => {
-        const text = new TextDecoder().decode(event.target.value).trim();
-        if (text === 'PRESS') sendSpaceKey('keydown');
-        else if (text === 'RELEASE') sendSpaceKey('keyup');
+      navigator.serial.addEventListener('disconnect', () => {
+        btn.textContent = '🔌 발페달 연결 (끊김, 재연결)';
       });
-
-      btn.textContent = '✅ 발페달 연결됨';
     }catch(err){
-      btn.textContent = '🔵 발페달 연결';
+      btn.textContent = '🔌 발페달 연결 (USB)';
       console.warn('발페달 연결 실패:', err.message);
     }
   }
